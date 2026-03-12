@@ -1,5 +1,7 @@
 from .callback_client import CallbackClient
+from .event_publisher import VideoEventPublisher
 from .storage_client import StorageClient
+from .stream_event_publisher import RedisStreamEventPublisher
 from .tts_client import (
     AudioDurationError,
     EmptyAudioError,
@@ -13,7 +15,9 @@ __all__ = [
     "CallbackClient",
     "EmptyAudioError",
     "OpenAITtsClient",
+    "RedisStreamEventPublisher",
     "StorageClient",
     "TtsConfigurationError",
     "TtsGenerationError",
+    "VideoEventPublisher",
 ]
