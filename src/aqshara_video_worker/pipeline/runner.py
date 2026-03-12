@@ -5,7 +5,7 @@ from time import monotonic
 
 from pydantic import ValidationError
 
-from aqshara_video_worker.clients.callback_client import CallbackClient
+from aqshara_video_worker.clients.event_publisher import VideoEventPublisher
 from aqshara_video_worker.clients.merge_client import (
     AudioSyncValidationError,
     MergeClient,
@@ -62,7 +62,7 @@ class SceneCodeArtifact:
 class PipelineRunner:
     def __init__(
         self,
-        callback_client: CallbackClient,
+        callback_client: VideoEventPublisher,
         storage_client: StorageClient,
         tts_client: OpenAITtsClient,
         render_client: RenderClient,
