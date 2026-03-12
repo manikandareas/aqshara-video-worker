@@ -10,6 +10,14 @@ Install dependencies:
 uv sync
 ```
 
+Configure environment:
+
+```bash
+cp .env.example .env
+```
+
+Required variables include `REDIS_URL`, the callback settings, and the R2 credentials.
+
 Run the worker entrypoint with JSON payload from stdin:
 
 ```bash
