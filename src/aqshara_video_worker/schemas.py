@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+SchemaVersion = Literal["2026-03-11"]
 TemplateType = Literal["title", "bullet", "pipeline", "chart", "conclusion"]
 SceneStatus = Literal["pending", "processing", "done", "error"]
 VideoLanguage = Literal["en", "id"]
@@ -33,6 +34,28 @@ class VideoGenerateJobPayload(BaseModel):
     language: VideoLanguage
     request_id: str | None = None
     attempt: int = Field(ge=1)
+
+
+class VideoGenerateCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: SchemaVersion
+    command_id: str
+    topic: str
+    job_id: str
+    document_id: str
+    owner_id: str
+    request_id: str | None = None
+    attempt: int = Field(ge=1)
+    target_duration_sec: int = Field(ge=30, le=90)
+    voice: str = Field(min_length=1)
+    language: VideoLanguage
+    render_profile: Literal["480p", "720p"] | None = None
+    ocr_object_key: str = Field(min_length=1)
+    output_prefix: str = Field(min_length=1)
+    correlation_id: str = Field(min_length=1)
+    trace_id: str | None = None
+    occurred_at: str
 
 
 class SceneConstraintSpec(BaseModel):

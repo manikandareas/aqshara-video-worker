@@ -1,10 +1,21 @@
+from pathlib import Path
+from uuid import uuid4
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _default_worker_name() -> str:
+    return f"video-worker-{uuid4().hex[:8]}"
 
 
 class WorkerSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(".env", "../.env"),
+        env_file=(
+            _PACKAGE_ROOT / ".env",
+        ),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -16,6 +27,33 @@ class WorkerSettings(BaseSettings):
     internal_service_token: str = Field(
         default="local-video-internal-token",
         alias="VIDEO_INTERNAL_SERVICE_TOKEN",
+    )
+    redis_url: str = Field(alias="REDIS_URL")
+    video_command_stream_name: str = Field(
+        default="video.job.commands",
+        alias="VIDEO_COMMAND_STREAM_NAME",
+    )
+    video_event_stream_name: str = Field(
+        default="video.job.events",
+        alias="VIDEO_EVENT_STREAM_NAME",
+    )
+    video_worker_consumer_group: str = Field(
+        default="video-workers",
+        alias="VIDEO_WORKER_CONSUMER_GROUP",
+    )
+    video_worker_consumer_name: str = Field(
+        default_factory=_default_worker_name,
+        alias="VIDEO_WORKER_CONSUMER_NAME",
+    )
+    video_worker_id: str = Field(
+        default_factory=_default_worker_name,
+        alias="VIDEO_WORKER_ID",
+    )
+    video_stream_batch_size: int = Field(default=1, alias="VIDEO_STREAM_BATCH_SIZE")
+    video_stream_block_ms: int = Field(default=5000, alias="VIDEO_STREAM_BLOCK_MS")
+    video_heartbeat_interval_sec: float = Field(
+        default=10.0,
+        alias="VIDEO_HEARTBEAT_INTERVAL_SEC",
     )
     r2_endpoint: str = Field(alias="R2_ENDPOINT")
     r2_region: str = Field(default="auto", alias="R2_REGION")
