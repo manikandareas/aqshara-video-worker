@@ -61,6 +61,10 @@ class MergeClient(Protocol):
 
 
 class FfmpegMergeClient:
+    _scene_drift_min_sec = 0.1
+    _scene_drift_ratio = 0.01
+    _mux_safety_pad_sec = 0.15
+
     def __init__(self, settings: WorkerSettings) -> None:
         self._ffmpeg_binary = self._resolve_binary(settings.ffmpeg_binary)
         self._ffprobe_binary = self._resolve_binary(settings.ffprobe_binary)
@@ -97,6 +101,19 @@ class FfmpegMergeClient:
                     raw_video.write_bytes(scene.video_bytes)
                     raw_audio.write_bytes(scene.audio_bytes)
                     width, height = self._resolve_output_dimensions(render_profile)
+                    expected_scene_duration_sec = scene.audio_duration_ms / 1000.0
+                    raw_video_duration_sec = await self._probe_duration(raw_video)
+                    stop_duration_sec = max(
+                        expected_scene_duration_sec - raw_video_duration_sec,
+                        0.0,
+                    ) + self._mux_safety_pad_sec
+                    stdout_logs.append(
+                        "scene-duration:"
+                        f" scene={scene.scene_index:02d}"
+                        f" planned_audio={expected_scene_duration_sec:.3f}s"
+                        f" raw_video={raw_video_duration_sec:.3f}s"
+                        f" stop_pad={stop_duration_sec:.3f}s",
+                    )
 
                     muxed = await self._run_command(
                         [
@@ -112,12 +129,14 @@ class FfmpegMergeClient:
                                 f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
                                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
                                 "fps=30,"
-                                "tpad=stop_mode=clone:stop_duration=10[v]"
+                                f"tpad=stop_mode=clone:stop_duration={stop_duration_sec:.3f}[v]"
                             ),
                             "-map",
                             "[v]",
                             "-map",
                             "1:a",
+                            "-af",
+                            f"apad=pad_dur={self._mux_safety_pad_sec:.3f}",
                             "-c:v",
                             "libx264",
                             "-preset",
@@ -128,7 +147,8 @@ class FfmpegMergeClient:
                             "aac",
                             "-ar",
                             "48000",
-                            "-shortest",
+                            "-t",
+                            f"{expected_scene_duration_sec:.3f}",
                             str(merged_clip),
                         ],
                     )
@@ -139,6 +159,19 @@ class FfmpegMergeClient:
                         stderr_logs.append(
                             f"scene-{scene.scene_index:02d}-mux-stderr:\n{muxed.stderr.strip()}",
                         )
+                    measured_scene_duration_sec = await self._probe_duration(merged_clip)
+                    stdout_logs.append(
+                        "scene-sync:"
+                        f" scene={scene.scene_index:02d}"
+                        f" expected={expected_scene_duration_sec:.3f}s"
+                        f" corrected={measured_scene_duration_sec:.3f}s",
+                    )
+                    self._validate_scene_duration(
+                        scene_index=scene.scene_index,
+                        expected_duration_sec=expected_scene_duration_sec,
+                        measured_duration_sec=measured_scene_duration_sec,
+                        raw_video_duration_sec=raw_video_duration_sec,
+                    )
                     clip_paths.append(merged_clip)
 
                 concat_file = workspace / "concat.txt"
@@ -185,7 +218,9 @@ class FfmpegMergeClient:
                     if drift_pct > self._max_drift_pct:
                         raise AudioSyncValidationError(
                             "Merged video duration drift exceeded threshold: "
-                            f"{drift_pct:.2f}% > {self._max_drift_pct:.2f}%",
+                            f"expected={expected_duration_sec:.3f}s "
+                            f"measured={measured_duration_sec:.3f}s "
+                            f"drift={drift_pct:.2f}% > {self._max_drift_pct:.2f}%",
                         )
 
                 return MergeVideoResult(
@@ -228,6 +263,37 @@ class FfmpegMergeClient:
         if render_profile == "480p":
             return (854, 480)
         return (1280, 720)
+
+    def _validate_scene_duration(
+        self,
+        *,
+        scene_index: int,
+        expected_duration_sec: float,
+        measured_duration_sec: float,
+        raw_video_duration_sec: float,
+    ) -> None:
+        tolerance_sec = max(
+            self._scene_drift_min_sec,
+            expected_duration_sec * self._scene_drift_ratio,
+        )
+        drift_sec = abs(measured_duration_sec - expected_duration_sec)
+        if drift_sec <= tolerance_sec:
+            return
+
+        drift_pct = (
+            0.0
+            if expected_duration_sec <= 0
+            else (drift_sec / expected_duration_sec) * 100
+        )
+        raise AudioSyncValidationError(
+            "Scene clip duration drift exceeded tolerance: "
+            f"scene={scene_index} "
+            f"expected={expected_duration_sec:.3f}s "
+            f"measured={measured_duration_sec:.3f}s "
+            f"raw_video={raw_video_duration_sec:.3f}s "
+            f"tolerance={tolerance_sec:.3f}s "
+            f"drift={drift_pct:.2f}%",
+        )
 
     @staticmethod
     def _resolve_binary(binary: str) -> str:
