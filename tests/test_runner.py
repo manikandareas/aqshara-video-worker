@@ -1,6 +1,11 @@
 import pytest
 from pydantic import ValidationError
 
+from aqshara_video_worker.clients.creative_generation_client import (
+    CreativeConfigurationError,
+    CreativeGenerationArtifacts,
+    CreativeGenerationError,
+)
 from aqshara_video_worker.clients.merge_client import (
     AudioSyncValidationError,
     MergeExecutionError,
@@ -10,8 +15,17 @@ from aqshara_video_worker.clients.render_client import RenderConfigurationError
 from aqshara_video_worker.clients.render_client import RenderTimeoutError
 from aqshara_video_worker.pipeline.codegen import CodeValidationError
 from aqshara_video_worker.pipeline.runner import PipelineRunner
-from aqshara_video_worker.schemas import SceneSpec
-from aqshara_video_worker.schemas import VideoGenerateJobPayload
+from aqshara_video_worker.pipeline.storyboard import build_storyboard_artifacts
+from aqshara_video_worker.schemas import (
+    PaperAnalysisSpec,
+    SceneCodeCritiqueSpec,
+    SceneCodeDraftSpec,
+    SceneScriptSpec,
+    SceneSpec,
+    ScriptPlanSpec,
+    StoryboardSpec,
+    VideoGenerateJobPayload,
+)
 
 
 class RecordingCallbackClient:
@@ -93,10 +107,16 @@ class RecordingStorageClient:
 
 class RecordingTtsClient:
     def __init__(self) -> None:
-        self.requests: list[tuple[str, str, str]] = []
+        self.requests: list[tuple[str, str, str, str | None]] = []
 
-    async def generate_speech(self, text: str, voice: str, language: str) -> bytes:
-        self.requests.append((text, voice, language))
+    async def generate_speech(
+        self,
+        text: str,
+        voice: str,
+        language: str,
+        voice_instruction: str | None = None,
+    ) -> bytes:
+        self.requests.append((text, voice, language, voice_instruction))
         return b"fake wav bytes"
 
     @staticmethod
@@ -204,6 +224,161 @@ class FailingMergeClient:
         raise self._error
 
 
+class RecordingCreativeClient:
+    def __init__(self) -> None:
+        self.requests: list[tuple[int, str]] = []
+        self.scene_draft_requests: list[list[int]] = []
+        self._scene_code_drafts: dict[int, SceneCodeDraftSpec] = {}
+
+    async def generate_artifacts(
+        self,
+        *,
+        ocr_result: object,
+        target_duration_sec: int,
+        language: str,
+    ) -> CreativeGenerationArtifacts:
+        self.requests.append((target_duration_sec, language))
+        baseline = build_storyboard_artifacts(ocr_result, target_duration_sec)
+        script_plan = self._build_script_plan(baseline.storyboard.scenes)
+        storyboard = self._build_storyboard(baseline.storyboard, script_plan)
+        scene_code_drafts = {
+            scene.scene_index: SceneCodeDraftSpec(
+                scene_index=scene.scene_index,
+                draft_code=self._build_scene_code(scene.scene_index, revised=False),
+                critique=SceneCodeCritiqueSpec(
+                    scene_index=scene.scene_index,
+                    strengths=["clear visual"],
+                    issues=["tight timing"],
+                    revision_brief="Keep the scene simple and valid.",
+                    requires_revision=True,
+                ),
+                revised_code=self._build_scene_code(scene.scene_index, revised=True),
+            )
+            for scene in storyboard.scenes
+        }
+        self._scene_code_drafts = scene_code_drafts
+        return CreativeGenerationArtifacts(
+            summary=baseline.summary,
+            paper_analysis=PaperAnalysisSpec(
+                topic=baseline.summary.topic,
+                problem=baseline.summary.problem,
+                method=baseline.summary.method,
+                result=baseline.summary.result,
+                conclusion=baseline.summary.conclusion,
+                key_entities=["AI", "Manim"],
+                visual_opportunities=["camera push"],
+                misconceptions=["slides are enough"],
+            ),
+            director_plan=baseline.director_plan,
+            script_plan=script_plan,
+            storyboard=storyboard,
+            scenes_markdown=baseline.scenes_markdown,
+            scene_code_drafts=scene_code_drafts,
+        )
+
+    @staticmethod
+    def _build_script_plan(scenes: list[SceneSpec]) -> ScriptPlanSpec:
+        return ScriptPlanSpec(
+            hook_line="What if the paper could explain itself visually?",
+            tone="clear and energetic",
+            scenes=[
+                SceneScriptSpec(
+                    scene_index=scene.scene_index,
+                    narration_text=f"AI script for scene {scene.scene_index}.",
+                    voice_instruction="Speak with momentum and clarity.",
+                    emphasis_terms=["AI", "visual"],
+                )
+                for scene in scenes
+            ],
+        )
+
+    @staticmethod
+    def _build_storyboard(
+        storyboard: StoryboardSpec,
+        script_plan: ScriptPlanSpec,
+    ) -> StoryboardSpec:
+        return storyboard.model_copy(
+            update={
+                "hook": script_plan.hook_line,
+                "scenes": [
+                    scene.model_copy(
+                        update={
+                            "narration_text": f"AI script for scene {scene.scene_index}.",
+                            "narration_cues": scene.narration_cues.model_copy(
+                                update={
+                                    "voice_instruction": "Speak with momentum and clarity."
+                                }
+                            ),
+                        }
+                    )
+                    for scene in storyboard.scenes
+                ],
+            }
+        )
+
+    @staticmethod
+    def _build_scene_code(scene_index: int, *, revised: bool) -> str:
+        render_seed = 2 if revised else 1
+        label = "AI revised scene" if revised else "AI scene"
+        play_call = (
+            "        self.play(Write(label), run_time=0.6)\n"
+            if revised
+            else "        self.play(Write(label))\n"
+        )
+        return (
+            "from manim import *\n\n"
+            'config.background_color = "#0B1020"\n\n'
+            f"class AIScene{scene_index:02d}(Scene):\n"
+            f"    RENDER_SEED = {render_seed}\n\n"
+            "    def construct(self):\n"
+            f"        label = Text('{label} {scene_index}')\n"
+            f"{play_call}"
+            "        self.wait(0.2)\n"
+        )
+
+    async def generate_scene_code_drafts(
+        self,
+        *,
+        paper_analysis: PaperAnalysisSpec,
+        director_plan,
+        storyboard,
+        language: str,
+    ) -> dict[int, SceneCodeDraftSpec]:
+        del paper_analysis, director_plan, language
+        self.scene_draft_requests.append(
+            [scene.target_render_duration_ms or scene.planned_duration_ms for scene in storyboard.scenes]
+        )
+        return dict(self._scene_code_drafts)
+
+
+class FailingCreativeClient:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def generate_artifacts(
+        self,
+        *,
+        ocr_result: object,
+        target_duration_sec: int,
+        language: str,
+    ) -> CreativeGenerationArtifacts:
+        raise self._error
+
+    async def generate_scene_code_drafts(
+        self,
+        *,
+        paper_analysis,
+        director_plan,
+        storyboard,
+        language: str,
+    ) -> dict[int, SceneCodeDraftSpec]:
+        del paper_analysis, director_plan, storyboard, language
+        raise self._error
+
+    async def close(self) -> None:
+        return None
+
+
 @pytest.mark.asyncio
 async def test_runner_emits_progress_and_complete_callbacks() -> None:
     callback_client = RecordingCallbackClient()
@@ -237,6 +412,7 @@ async def test_runner_emits_progress_and_complete_callbacks() -> None:
     assert storage_client.downloads == ["documents/doc_1/artifacts/ocr/raw.json"]
     assert storage_client.uploads == [
         ("videos/vjob_1/artifacts/summary.json", "application/json"),
+        ("videos/vjob_1/artifacts/director_plan.json", "application/json"),
         ("videos/vjob_1/artifacts/storyboard.json", "application/json"),
         ("videos/vjob_1/artifacts/scenes.md", "text/markdown"),
         ("videos/vjob_1/artifacts/audio/scene-01.wav", "audio/wav"),
@@ -266,6 +442,7 @@ async def test_runner_emits_progress_and_complete_callbacks() -> None:
     complete_payload = callback_client.events[-1][2]
     assert complete_payload["artifact_keys"] == [
         "videos/vjob_1/artifacts/summary.json",
+        "videos/vjob_1/artifacts/director_plan.json",
         "videos/vjob_1/artifacts/storyboard.json",
         "videos/vjob_1/artifacts/scenes.md",
         "videos/vjob_1/artifacts/audio/scene-01.wav",
@@ -291,6 +468,7 @@ async def test_runner_emits_progress_and_complete_callbacks() -> None:
         "videos/vjob_1/artifacts/merge.log",
     ]
     assert len(tts_client.requests) == 5
+    assert tts_client.requests[0][3]
     assert len(render_client.requests) == 5
     assert merge_client.requests == [([1, 2, 3, 4, 5], "720p")]
 
@@ -627,3 +805,126 @@ async def test_runner_does_not_retry_render_configuration_failures() -> None:
         )
 
     assert render_client.requests == [(1, "720p")]
+
+
+@pytest.mark.asyncio
+async def test_runner_uses_creative_client_artifacts_when_available() -> None:
+    callback_client = RecordingCallbackClient()
+    storage_client = RecordingStorageClient()
+    tts_client = RecordingTtsClient()
+    render_client = RecordingRenderClient()
+    merge_client = RecordingMergeClient()
+    creative_client = RecordingCreativeClient()
+    runner = PipelineRunner(
+        callback_client,
+        storage_client,
+        tts_client,
+        render_client,
+        merge_client,
+        creative_client=creative_client,
+    )
+
+    await runner.run(
+        VideoGenerateJobPayload(
+            video_job_id="vjob_ai",
+            document_id="doc_ai",
+            actor_id="user_ai",
+            target_duration_sec=60,
+            voice="alloy",
+            language="en",
+            attempt=1,
+        )
+    )
+
+    assert creative_client.requests == [(60, "en")]
+    assert creative_client.scene_draft_requests == [[12_345, 12_345, 12_345, 12_345, 12_345]]
+    assert ("videos/vjob_ai/artifacts/paper_analysis.json", "application/json") in storage_client.uploads
+    assert ("videos/vjob_ai/artifacts/script_plan.json", "application/json") in storage_client.uploads
+    assert (
+        "videos/vjob_ai/artifacts/creative/scene-01-critique.json",
+        "application/json",
+    ) in storage_client.uploads
+    assert (
+        "videos/vjob_ai/artifacts/creative/scene-01-revised.py",
+        "text/x-python",
+    ) in storage_client.uploads
+    assert "AI script for scene 1." in tts_client.requests[0][0]
+    assert "AIScene01" in render_client.requests[0][1]
+
+
+@pytest.mark.asyncio
+async def test_runner_fails_fast_when_creative_generation_fails() -> None:
+    callback_client = RecordingCallbackClient()
+    storage_client = RecordingStorageClient()
+    tts_client = RecordingTtsClient()
+    render_client = RecordingRenderClient()
+    merge_client = RecordingMergeClient()
+    runner = PipelineRunner(
+        callback_client,
+        storage_client,
+        tts_client,
+        render_client,
+        merge_client,
+        creative_client=FailingCreativeClient(
+            CreativeGenerationError("creative provider unavailable")
+        ),
+    )
+
+    with pytest.raises(CreativeGenerationError, match="creative provider unavailable"):
+        await runner.run(
+            VideoGenerateJobPayload(
+                video_job_id="vjob_creative_fail",
+                document_id="doc_creative_fail",
+                actor_id="user_creative_fail",
+                target_duration_sec=60,
+                voice="alloy",
+                language="en",
+                attempt=1,
+            )
+        )
+
+    assert tts_client.requests == []
+    assert render_client.requests == []
+    assert merge_client.requests == []
+    assert not any(
+        event[0] == "progress" and event[2].get("fallback_reason") == "creative_ai_fallback_deterministic"
+        for event in callback_client.events
+    )
+
+
+@pytest.mark.asyncio
+async def test_runner_fails_fast_when_creative_config_is_invalid() -> None:
+    callback_client = RecordingCallbackClient()
+    storage_client = RecordingStorageClient()
+    tts_client = RecordingTtsClient()
+    render_client = RecordingRenderClient()
+    merge_client = RecordingMergeClient()
+    runner = PipelineRunner(
+        callback_client,
+        storage_client,
+        tts_client,
+        render_client,
+        merge_client,
+        creative_client=FailingCreativeClient(
+            CreativeConfigurationError("VIDEO_CREATIVE_API_KEY is required")
+        ),
+    )
+
+    with pytest.raises(
+        CreativeConfigurationError,
+        match="VIDEO_CREATIVE_API_KEY is required",
+    ):
+        await runner.run(
+            VideoGenerateJobPayload(
+                video_job_id="vjob_creative_config_fail",
+                document_id="doc_creative_config_fail",
+                actor_id="user_creative_config_fail",
+                target_duration_sec=60,
+                voice="alloy",
+                language="en",
+                attempt=1,
+            )
+        )
+
+    assert tts_client.requests == []
+    assert render_client.requests == []

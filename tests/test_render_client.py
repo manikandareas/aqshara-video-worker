@@ -1,44 +1,54 @@
 import pytest
 
 from aqshara_video_worker.clients.render_client import (
-    MockRenderClient,
+    DaytonaRenderClient,
     RenderConfigurationError,
     RenderClientError,
-    DaytonaRenderClient,
+    MockRenderClient,
 )
 from aqshara_video_worker.config import WorkerSettings
 
 
-def build_settings() -> WorkerSettings:
-    return WorkerSettings.model_construct(
-        callback_base_url="http://127.0.0.1:8000/api/v1",
-        internal_service_token="token",
-        r2_endpoint="http://localhost:9000",
-        r2_region="auto",
-        r2_access_key_id="key",
-        r2_secret_access_key="secret",
-        r2_bucket="bucket",
-        openai_api_key=None,
-        openai_base_url="https://api.openai.com/v1",
-        openai_tts_model="gpt-4o-mini-tts",
-        openai_timeout_sec=60,
-        video_render_backend="mock",
-        video_render_profile="720p",
-        video_render_timeout_sec=30,
-        video_merge_timeout_sec=30,
-        video_audio_sync_max_drift_pct=15.0,
-        ffmpeg_binary="/opt/homebrew/bin/ffmpeg",
-        ffprobe_binary="/opt/homebrew/bin/ffprobe",
-        daytona_api_url=None,
-        daytona_api_key=None,
-        daytona_target=None,
-        daytona_python_version="3.12",
-        daytona_render_image=None,
-        daytona_create_timeout_sec=300,
-        daytona_render_cpu=2,
-        daytona_render_memory_gb=4,
-        daytona_render_disk_gb=8,
-    )
+BASE_SETTINGS = {
+    "callback_base_url": "http://127.0.0.1:8000/api/v1",
+    "internal_service_token": "token",
+    "r2_endpoint": "http://localhost:9000",
+    "r2_region": "auto",
+    "r2_access_key_id": "key",
+    "r2_secret_access_key": "secret",
+    "r2_bucket": "bucket",
+    "video_tts_openai_api_key": None,
+    "video_tts_openai_base_url": "https://api.openai.com/v1",
+    "video_tts_openai_model": "gpt-4o-mini-tts",
+    "video_tts_openai_timeout_sec": 60,
+    "video_creative_provider": "openai_compatible",
+    "video_creative_api_key": None,
+    "video_creative_base_url": None,
+    "video_creative_generation_model": None,
+    "video_creative_critique_model": None,
+    "video_creative_codegen_model": None,
+    "video_creative_timeout_sec": 90.0,
+    "video_render_backend": "mock",
+    "video_render_profile": "720p",
+    "video_render_timeout_sec": 30,
+    "video_merge_timeout_sec": 30,
+    "video_audio_sync_max_drift_pct": 15.0,
+    "ffmpeg_binary": "/opt/homebrew/bin/ffmpeg",
+    "ffprobe_binary": "/opt/homebrew/bin/ffprobe",
+    "daytona_api_url": None,
+    "daytona_api_key": None,
+    "daytona_target": None,
+    "daytona_python_version": "3.12",
+    "daytona_render_image": None,
+    "daytona_create_timeout_sec": 300,
+    "daytona_render_cpu": 2,
+    "daytona_render_memory_gb": 4,
+    "daytona_render_disk_gb": 8,
+}
+
+
+def build_settings(**overrides: object) -> WorkerSettings:
+    return WorkerSettings.model_construct(**(BASE_SETTINGS | overrides))
 
 
 @pytest.mark.asyncio

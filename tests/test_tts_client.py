@@ -80,7 +80,9 @@ async def test_tts_client_sends_wav_request_and_returns_audio() -> None:
     speech = FakeStreamingSpeech(pcm_bytes)
     client = OpenAITtsClient(
         WorkerSettings(
-            OPENAI_API_KEY="openai-key",
+            _env_file=None,
+            VIDEO_TTS_OPENAI_API_KEY="openai-key",
+            REDIS_URL="redis://localhost:6379/0",
             R2_ENDPOINT="https://example.r2.cloudflarestorage.com",
             R2_ACCESS_KEY_ID="key",
             R2_SECRET_ACCESS_KEY="secret",
@@ -115,7 +117,9 @@ async def test_tts_client_sends_wav_request_and_returns_audio() -> None:
 async def test_tts_client_rejects_empty_audio_payload() -> None:
     client = OpenAITtsClient(
         WorkerSettings(
-            OPENAI_API_KEY="openai-key",
+            _env_file=None,
+            VIDEO_TTS_OPENAI_API_KEY="openai-key",
+            REDIS_URL="redis://localhost:6379/0",
             R2_ENDPOINT="https://example.r2.cloudflarestorage.com",
             R2_ACCESS_KEY_ID="key",
             R2_SECRET_ACCESS_KEY="secret",
@@ -139,7 +143,9 @@ async def test_tts_client_rejects_empty_audio_payload() -> None:
 async def test_tts_client_maps_http_errors_to_generation_error() -> None:
     client = OpenAITtsClient(
         WorkerSettings(
-            OPENAI_API_KEY="openai-key",
+            _env_file=None,
+            VIDEO_TTS_OPENAI_API_KEY="openai-key",
+            REDIS_URL="redis://localhost:6379/0",
             R2_ENDPOINT="https://example.r2.cloudflarestorage.com",
             R2_ACCESS_KEY_ID="key",
             R2_SECRET_ACCESS_KEY="secret",

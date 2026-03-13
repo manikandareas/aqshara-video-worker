@@ -20,6 +20,7 @@ async def test_callback_client_preserves_api_v1_base_path() -> None:
     transport = httpx.MockTransport(handler)
     client = CallbackClient(
         WorkerSettings(
+            _env_file=None,
             VIDEO_WORKER_CALLBACK_BASE_URL="http://127.0.0.1:3000/api/v1/",
             VIDEO_INTERNAL_SERVICE_TOKEN="token_1",
             REDIS_URL="redis://localhost:6379/0",
