@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from openai import APIError
 from openai import APIStatusError
 from openai import AsyncOpenAI
+from pydantic import BaseModel
 
 from aqshara_video_worker.config import WorkerSettings
 from aqshara_video_worker.pipeline.storyboard import (
@@ -46,6 +47,9 @@ class CreativeGenerationArtifacts:
     storyboard: StoryboardSpec
     scenes_markdown: str
     scene_code_drafts: dict[int, SceneCodeDraftSpec] = field(default_factory=dict)
+
+
+StructuredResponseModel = TypeVar("StructuredResponseModel", bound=BaseModel)
 
 
 class OpenAICompatibleCreativeGenerationClient:
@@ -165,8 +169,11 @@ class OpenAICompatibleCreativeGenerationClient:
                 ),
             },
         ]
-        payload = await self._chat_json(self._generation_model, messages)
-        return PaperAnalysisSpec.model_validate(payload)
+        return await self._chat_json(
+            self._generation_model,
+            messages,
+            response_model=PaperAnalysisSpec,
+        )
 
     async def _generate_director_plan(
         self,
@@ -197,8 +204,15 @@ class OpenAICompatibleCreativeGenerationClient:
                 ),
             },
         ]
-        payload = await self._chat_json(self._generation_model, messages)
-        payload = _normalize_director_plan_payload(payload, baseline_director_plan)
+        parsed = await self._chat_json(
+            self._generation_model,
+            messages,
+            response_model=DirectorPlanSpec,
+        )
+        payload = _normalize_director_plan_payload(
+            parsed.model_dump(),
+            baseline_director_plan,
+        )
         return DirectorPlanSpec.model_validate(payload)
 
     async def _generate_script_plan(
@@ -238,8 +252,11 @@ class OpenAICompatibleCreativeGenerationClient:
                 ),
             },
         ]
-        payload = await self._chat_json(self._generation_model, messages)
-        script_plan = ScriptPlanSpec.model_validate(payload)
+        script_plan = await self._chat_json(
+            self._generation_model,
+            messages,
+            response_model=ScriptPlanSpec,
+        )
         if len(script_plan.scenes) != len(director_plan.scenes):
             raise CreativeGenerationError(
                 "Script plan scene count did not match director plan"
@@ -363,8 +380,11 @@ class OpenAICompatibleCreativeGenerationClient:
                 ),
             },
         ]
-        payload = await self._chat_json(self._critique_model, messages)
-        return SceneCodeCritiqueSpec.model_validate(payload)
+        return await self._chat_json(
+            self._critique_model,
+            messages,
+            response_model=SceneCodeCritiqueSpec,
+        )
 
     async def _revise_scene_code(
         self,
@@ -396,14 +416,58 @@ class OpenAICompatibleCreativeGenerationClient:
         self,
         model: str,
         messages: list[dict[str, str]],
-    ) -> dict[str, object]:
+        *,
+        response_model: type[StructuredResponseModel],
+    ) -> StructuredResponseModel:
+        try:
+            return await self._chat_structured(model, messages, response_model)
+        except CreativeGenerationError as error:
+            if not _is_structured_output_capability_error(error):
+                raise
+
         raw_content = await self._chat_text(model, messages, json_mode=True)
         payload = _load_json_object(raw_content)
         if not isinstance(payload, dict):
             raise CreativeGenerationError(
                 "OpenAI creative response must decode to a JSON object"
             )
-        return payload
+        return response_model.model_validate(payload)
+
+    async def _chat_structured(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        response_model: type[StructuredResponseModel],
+    ) -> StructuredResponseModel:
+        try:
+            response = await self._client.beta.chat.completions.parse(
+                model=model,
+                messages=cast(Any, messages),  # pyright: ignore[reportArgumentType]
+                response_format=response_model,
+                timeout=self._timeout_sec,
+            )
+        except APIStatusError as error:
+            detail = (getattr(error, "body", None) or {}).get("message", "")
+            raise CreativeGenerationError(
+                detail or "OpenAI creative request failed"
+            ) from error
+        except APIError as error:
+            raise CreativeGenerationError("OpenAI creative request failed") from error
+
+        choice = response.choices[0]
+        message = getattr(choice, "message", None)
+        refusal = getattr(message, "refusal", None) if message else None
+        if refusal:
+            raise CreativeGenerationError(f"OpenAI creative request was refused: {refusal}")
+
+        parsed = getattr(message, "parsed", None) if message else None
+        if parsed is None:
+            raise CreativeGenerationError(
+                "OpenAI creative structured response could not be parsed"
+            )
+        if isinstance(parsed, response_model):
+            return parsed
+        return response_model.model_validate(parsed)
 
     async def _chat_text(
         self,
@@ -548,6 +612,28 @@ def _load_json_object(raw_content: str) -> object:
         ) from error
 
 
+def _is_structured_output_capability_error(error: Exception) -> bool:
+    detail = ""
+    if isinstance(error, APIStatusError):
+        body = getattr(error, "body", None) or {}
+        if isinstance(body, dict):
+            detail = str(body.get("message", ""))
+    if not detail:
+        detail = str(error)
+    lowered = detail.lower()
+    return any(
+        token in lowered
+        for token in (
+            "json_schema",
+            "response_format",
+            "structured output",
+            "not supported",
+            "unsupported",
+            "invalid parameter",
+        )
+    )
+
+
 def _extract_first_json_object(value: str) -> str | None:
     start = value.find("{")
     if start < 0:
@@ -629,6 +715,11 @@ def _normalize_director_plan_payload(
             ]
 
         repaired_scene = dict(raw_scene)
+        repaired_scene["scene_kind"] = _coerce_enum(
+            repaired_scene.get("scene_kind"),
+            allowed=("hook", "problem", "mechanism", "evidence", "takeaway", "fallback"),
+            fallback=fallback_scene.scene_kind,
+        )
         repaired_scene["transition_strategy"] = _coerce_enum(
             repaired_scene.get("transition_strategy"),
             allowed=("fade", "transform", "highlight", "zoom"),
@@ -700,6 +791,11 @@ def _coerce_enum(value: object, *, allowed: tuple[str, ...], fallback: str) -> s
         if lowered in allowed:
             return lowered
         keyword_map = {
+            "problem": ("problem", "stakes", "challenge", "motivation", "pain"),
+            "mechanism": ("mechanism", "pipeline", "process", "workflow", "system"),
+            "evidence": ("evidence", "result", "results", "data", "chart", "metric"),
+            "takeaway": ("takeaway", "conclusion", "closing", "summary", "recap"),
+            "fallback": ("fallback", "backup", "default", "generic", "bullet"),
             "fade": ("crossfade", "fade", "dissolve", "still", "settle", "soft"),
             "transform": (
                 "slide",

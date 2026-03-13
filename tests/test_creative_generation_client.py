@@ -21,14 +21,31 @@ class _FakeMessage:
         self.content = content
 
 
+class _FakeParsedMessage:
+    def __init__(self, parsed: object) -> None:
+        self.content = None
+        self.parsed = parsed
+        self.refusal = None
+
+
 class _FakeChoice:
     def __init__(self, content: str) -> None:
         self.message = _FakeMessage(content)
 
 
+class _FakeParsedChoice:
+    def __init__(self, parsed: object) -> None:
+        self.message = _FakeParsedMessage(parsed)
+
+
 class _FakeResponse:
     def __init__(self, content: str) -> None:
         self.choices = [_FakeChoice(content)]
+
+
+class _FakeParsedResponse:
+    def __init__(self, parsed: object) -> None:
+        self.choices = [_FakeParsedChoice(parsed)]
 
 
 class _FakeChatCompletions:
@@ -40,15 +57,28 @@ class _FakeChatCompletions:
         self.calls.append(kwargs)
         return _FakeResponse(self._responses.pop(0))
 
+    async def parse(self, **kwargs: object) -> _FakeParsedResponse:
+        self.calls.append(kwargs)
+        response_model = kwargs["response_format"]
+        raw_content = self._responses.pop(0)
+        parsed = response_model.model_validate_json(raw_content)
+        return _FakeParsedResponse(parsed)
+
 
 class _FakeChat:
     def __init__(self, responses: list[str]) -> None:
         self.completions = _FakeChatCompletions(responses)
 
 
+class _FakeBeta:
+    def __init__(self, responses: list[str]) -> None:
+        self.chat = _FakeChat(responses)
+
+
 class _FakeOpenAIClient:
     def __init__(self, responses: list[str]) -> None:
         self.chat = _FakeChat(responses)
+        self.beta = _FakeBeta(responses)
 
     async def close(self) -> None:
         return None
@@ -80,7 +110,7 @@ async def test_creative_generation_client_builds_artifacts_from_openai_responses
                 "recurring_motifs": ["zoom", "highlight", "transformation"],
                 "target_story_arc": [
                     "hook",
-                    "stakes",
+                    "problem",
                     "mechanism",
                     "evidence",
                     "takeaway",
@@ -437,7 +467,8 @@ async def test_creative_generation_client_builds_artifacts_from_openai_responses
     assert artifacts.scene_code_drafts == {}
     assert scene_code_drafts[1].critique.requires_revision is True
     assert "AIScene01" in scene_code_drafts[1].revised_code
-    assert len(fake_client.chat.completions.calls) == 14
+    assert len(fake_client.chat.completions.calls) == 6
+    assert len(fake_client.beta.chat.completions.calls) == 8
 
 
 @pytest.mark.asyncio
@@ -502,6 +533,7 @@ def test_normalize_director_plan_payload_repairs_invalid_enum_fields_and_chart_s
     )
     payload = baseline.director_plan.model_dump()
     payload["quality_score"] = 1.8
+    payload["scenes"][1]["scene_kind"] = "stakes"
     payload["scenes"][0]["transition_strategy"] = (
         "dramatic crossfade and rapid time-lapse grow"
     )
@@ -519,6 +551,7 @@ def test_normalize_director_plan_payload_repairs_invalid_enum_fields_and_chart_s
     repaired = DirectorPlanSpec.model_validate(normalized)
 
     assert repaired.quality_score == 1.0
+    assert repaired.scenes[1].scene_kind == "problem"
     assert repaired.scenes[0].transition_strategy == "fade"
     assert repaired.scenes[0].camera_plan.mode == "focus"
     assert repaired.scenes[0].beats[0].motion == "fade"

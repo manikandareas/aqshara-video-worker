@@ -82,7 +82,7 @@ def build_storyboard_artifacts(
             "camera push into the current focal idea",
             "left-to-right research progression",
         ],
-        target_story_arc=["hook", "stakes", "mechanism", "evidence", "takeaway"],
+        target_story_arc=["hook", "problem", "mechanism", "evidence", "takeaway"],
         quality_score=0.0,
         scenes=[
             _build_hook_director_scene(summary, entities, durations[0]),

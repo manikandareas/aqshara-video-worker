@@ -22,6 +22,13 @@ def test_storyboard_builder_creates_summary_scenes_and_markdown() -> None:
 
     assert artifacts.summary.topic == "Adaptive Research Videos"
     assert artifacts.director_plan.style_profile == "3b1b-lite"
+    assert artifacts.director_plan.target_story_arc == [
+        "hook",
+        "problem",
+        "mechanism",
+        "evidence",
+        "takeaway",
+    ]
     assert len(artifacts.storyboard.scenes) == 5
     assert sum(scene.planned_duration_ms for scene in artifacts.storyboard.scenes) == 60000
     assert "## Scene 1: Adaptive Research Videos" in artifacts.scenes_markdown
