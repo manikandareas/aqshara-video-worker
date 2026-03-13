@@ -6,6 +6,10 @@ import logging
 from contextlib import suppress
 from dataclasses import dataclass
 
+from aqshara_video_worker.clients.ai_clients import CreativeGenerationClient, TtsClient
+from aqshara_video_worker.clients.creative_generation_client import (
+    create_creative_generation_client,
+)
 from aqshara_video_worker.clients.merge_client import MergeClient, create_merge_client
 from aqshara_video_worker.clients.render_client import RenderClient, create_render_client
 from aqshara_video_worker.clients.stream_event_publisher import RedisStreamEventPublisher
@@ -23,9 +27,10 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class WorkerDependencies:
     storage_client: StorageClient
-    tts_client: OpenAITtsClient
+    tts_client: TtsClient
     render_client: RenderClient
     merge_client: MergeClient
+    creative_client: CreativeGenerationClient | None
 
 
 async def _run_worker() -> int:
@@ -52,6 +57,8 @@ async def _run_worker() -> int:
         await transport.close()
         await dependencies.tts_client.close()
         await dependencies.render_client.close()
+        if dependencies.creative_client is not None:
+            await dependencies.creative_client.close()
 
 
 def _create_worker_dependencies(settings: WorkerSettings) -> WorkerDependencies:
@@ -60,6 +67,7 @@ def _create_worker_dependencies(settings: WorkerSettings) -> WorkerDependencies:
         tts_client=OpenAITtsClient(settings),
         render_client=create_render_client(settings),
         merge_client=create_merge_client(settings),
+        creative_client=create_creative_generation_client(settings),
     )
 
 
@@ -82,6 +90,7 @@ async def _process_command(
         dependencies.tts_client,
         dependencies.render_client,
         dependencies.merge_client,
+        creative_client=dependencies.creative_client,
         render_profile=command.render_profile or settings.video_render_profile,
     )
     heartbeat_task = asyncio.create_task(_heartbeat_loop(publisher, settings))
