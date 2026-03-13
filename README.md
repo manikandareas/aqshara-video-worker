@@ -16,7 +16,9 @@ Configure environment:
 cp .env.example .env
 ```
 
-Required variables include `REDIS_URL`, the callback settings, and the R2 credentials.
+Required variables include `REDIS_URL`, the callback settings, the R2 credentials,
+`VIDEO_TTS_OPENAI_*` for speech generation, and `VIDEO_CREATIVE_*` when
+`VIDEO_AI_CREATIVE_ENABLED=true`.
 
 Run the worker entrypoint with JSON payload from stdin:
 
