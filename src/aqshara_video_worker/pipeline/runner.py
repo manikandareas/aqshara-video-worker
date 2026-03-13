@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import ast
+import json
 from dataclasses import dataclass
 from time import monotonic
 
 from pydantic import ValidationError
 
+from aqshara_video_worker.clients.ai_clients import CreativeGenerationClient, TtsClient
 from aqshara_video_worker.clients.event_publisher import VideoEventPublisher
+from aqshara_video_worker.clients.creative_generation_client import (
+    CreativeConfigurationError,
+    CreativeGenerationArtifacts,
+    CreativeGenerationError,
+)
 from aqshara_video_worker.clients.merge_client import (
     AudioSyncValidationError,
     MergeClient,
@@ -24,7 +32,6 @@ from aqshara_video_worker.clients.storage_client import StorageClient
 from aqshara_video_worker.clients.tts_client import (
     AudioDurationError,
     EmptyAudioError,
-    OpenAITtsClient,
     TtsConfigurationError,
     TtsGenerationError,
 )
@@ -36,10 +43,12 @@ from aqshara_video_worker.pipeline.codegen import (
 )
 from aqshara_video_worker.pipeline.storyboard import (
     build_storyboard_artifacts,
+    dumps_director_plan,
     dumps_storyboard,
     dumps_summary,
 )
 from aqshara_video_worker.schemas import (
+    SceneCodeDraftSpec,
     InternalVideoComplete,
     InternalVideoFail,
     InternalVideoMetrics,
@@ -64,9 +73,10 @@ class PipelineRunner:
         self,
         callback_client: VideoEventPublisher,
         storage_client: StorageClient,
-        tts_client: OpenAITtsClient,
+        tts_client: TtsClient,
         render_client: RenderClient,
         merge_client: MergeClient,
+        creative_client: CreativeGenerationClient | None = None,
         render_profile: str = "720p",
     ) -> None:
         self._callback_client = callback_client
@@ -74,6 +84,7 @@ class PipelineRunner:
         self._tts_client = tts_client
         self._render_client = render_client
         self._merge_client = merge_client
+        self._creative_client = creative_client
         self._render_profile = "480p" if render_profile == "480p" else "720p"
 
     async def run(self, job: VideoGenerateJobPayload) -> None:
@@ -113,7 +124,15 @@ class PipelineRunner:
             ),
         )
 
-        artifacts = build_storyboard_artifacts(
+        creative_artifacts: CreativeGenerationArtifacts | None = None
+        if self._creative_client is not None:
+            creative_artifacts = await self._creative_client.generate_artifacts(
+                ocr_result=ocr_result,
+                target_duration_sec=job.target_duration_sec,
+                language=job.language,
+            )
+
+        artifacts = creative_artifacts or build_storyboard_artifacts(
             ocr_result,
             target_duration_sec=job.target_duration_sec,
         )
@@ -128,18 +147,35 @@ class PipelineRunner:
             "application/json",
         )
         artifact_keys.append(summary_key)
+        artifact_keys.extend(
+            await self._persist_creative_planning_artifacts(
+                job=job,
+                creative_artifacts=creative_artifacts,
+            )
+        )
 
         await self._callback_client.send_progress(
             job.video_job_id,
             InternalVideoProgress(
                 pipeline_stage="storyboarding",
                 progress_pct=40,
-                message="Building storyboard scenes",
+                message="Building director plan and storyboard scenes",
                 metrics=InternalVideoMetrics(
                     elapsed_ms=self._elapsed_ms(started_at),
                 ),
             ),
         )
+
+        director_plan_key = self._storage_client.create_video_artifact_key(
+            job.video_job_id,
+            "director_plan.json",
+        )
+        await self._storage_client.upload_text(
+            director_plan_key,
+            dumps_director_plan(artifacts.director_plan),
+            "application/json",
+        )
+        artifact_keys.append(director_plan_key)
 
         storyboard_key = self._storage_client.create_video_artifact_key(
             job.video_job_id,
@@ -184,9 +220,9 @@ class PipelineRunner:
                     ),
                     metrics=InternalVideoMetrics(
                         elapsed_ms=self._elapsed_ms(started_at),
-                    ),
                 ),
-            )
+            ),
+        )
 
         await self._callback_client.send_progress(
             job.video_job_id,
@@ -236,6 +272,7 @@ class PipelineRunner:
                 text=scene.narration_text,
                 voice=job.voice,
                 language=job.language,
+                voice_instruction=scene.narration_cues.voice_instruction,
             )
             actual_audio_duration_ms = self._tts_client.measure_duration_ms(
                 audio_bytes,
@@ -278,8 +315,21 @@ class PipelineRunner:
                     ),
                     metrics=InternalVideoMetrics(
                         elapsed_ms=self._elapsed_ms(started_at),
-                    ),
                 ),
+            ),
+        )
+
+        aligned_storyboard = self._build_audio_aligned_storyboard(
+            artifacts.storyboard,
+            scene_audio_metadata,
+        )
+        creative_scene_code_drafts: dict[int, SceneCodeDraftSpec] = {}
+        if creative_artifacts is not None and self._creative_client is not None:
+            creative_scene_code_drafts = await self._creative_client.generate_scene_code_drafts(
+                paper_analysis=creative_artifacts.paper_analysis,
+                director_plan=creative_artifacts.director_plan,
+                storyboard=aligned_storyboard,
+                language=job.language,
             )
 
         await self._callback_client.send_progress(
@@ -300,7 +350,7 @@ class PipelineRunner:
             ),
         )
 
-        for index, scene in enumerate(artifacts.storyboard.scenes, start=1):
+        for index, scene in enumerate(aligned_storyboard.scenes, start=1):
             actual_audio_duration_ms, scene_audio_key, _audio_bytes = scene_audio_metadata[
                 scene.scene_index
             ]
@@ -308,11 +358,22 @@ class PipelineRunner:
                 job.video_job_id,
                 scene.scene_index,
             )
+            ai_scene_code_draft = None
+            if creative_scene_code_drafts:
+                ai_scene_code_draft = creative_scene_code_drafts.get(scene.scene_index)
+                artifact_keys.extend(
+                    await self._persist_scene_creative_artifacts(
+                        job=job,
+                        scene_index=scene.scene_index,
+                        scene_code_draft=ai_scene_code_draft,
+                    )
+                )
             code_artifact, _fallback_reason = await self._prepare_scene_code_artifact(
                 job=job,
                 scene=scene,
                 scene_code_key=scene_code_key,
                 started_at=started_at,
+                ai_scene_code_draft=ai_scene_code_draft,
             )
             await self._storage_client.upload_text(
                 scene_code_key,
@@ -368,7 +429,7 @@ class PipelineRunner:
             ),
         )
 
-        for index, scene in enumerate(artifacts.storyboard.scenes, start=1):
+        for index, scene in enumerate(aligned_storyboard.scenes, start=1):
             actual_audio_duration_ms, scene_audio_key, _audio_bytes = scene_audio_metadata[
                 scene.scene_index
             ]
@@ -496,7 +557,7 @@ class PipelineRunner:
                     audio_bytes=scene_audio_metadata[scene.scene_index][2],
                     audio_duration_ms=scene_audio_metadata[scene.scene_index][0],
                 )
-                for scene in artifacts.storyboard.scenes
+                for scene in aligned_storyboard.scenes
             ],
             render_profile=active_render_profile,
         )
@@ -577,6 +638,10 @@ class PipelineRunner:
     def _classify_failure(error: Exception) -> tuple[str, str]:
         if isinstance(error, ValidationError):
             return ("SCENESPEC_INVALID", "storyboard_validating")
+        if isinstance(error, CreativeConfigurationError):
+            return ("CREATIVE_CONFIGURATION_ERROR", "storyboarding")
+        if isinstance(error, CreativeGenerationError):
+            return ("CREATIVE_GENERATION_FAILED", "storyboarding")
         if isinstance(error, TtsConfigurationError):
             return ("TTS_CONFIGURATION_ERROR", "tts_generating")
         if isinstance(error, EmptyAudioError):
@@ -605,6 +670,67 @@ class PipelineRunner:
             return ("MERGE_EXECUTION_FAILED", "merging")
         return ("INTERNAL_UNKNOWN_ERROR", "failed")
 
+    async def _persist_creative_planning_artifacts(
+        self,
+        *,
+        job: VideoGenerateJobPayload,
+        creative_artifacts: CreativeGenerationArtifacts | None,
+    ) -> list[str]:
+        if creative_artifacts is None:
+            return []
+
+        uploads = [
+            (
+                self._storage_client.create_video_artifact_key(
+                    job.video_job_id,
+                    "paper_analysis.json",
+                ),
+                creative_artifacts.paper_analysis.model_dump_json(indent=2),
+            ),
+            (
+                self._storage_client.create_video_artifact_key(
+                    job.video_job_id,
+                    "script_plan.json",
+                ),
+                creative_artifacts.script_plan.model_dump_json(indent=2),
+            ),
+        ]
+        artifact_keys: list[str] = []
+        for key, body in uploads:
+            await self._storage_client.upload_text(key, body, "application/json")
+            artifact_keys.append(key)
+        return artifact_keys
+
+    async def _persist_scene_creative_artifacts(
+        self,
+        *,
+        job: VideoGenerateJobPayload,
+        scene_index: int,
+        scene_code_draft: SceneCodeDraftSpec | None,
+    ) -> list[str]:
+        if scene_code_draft is None:
+            return []
+
+        critique_key = self._storage_client.create_video_artifact_key(
+            job.video_job_id,
+            f"creative/scene-{scene_index:02d}-critique.json",
+        )
+        revised_key = self._storage_client.create_video_artifact_key(
+            job.video_job_id,
+            f"creative/scene-{scene_index:02d}-revised.py",
+        )
+        await self._storage_client.upload_text(
+            critique_key,
+            scene_code_draft.critique.model_dump_json(indent=2),
+            "application/json",
+        )
+        await self._storage_client.upload_text(
+            revised_key,
+            scene_code_draft.revised_code,
+            "text/x-python",
+        )
+        return [critique_key, revised_key]
+
     async def _prepare_scene_code_artifact(
         self,
         *,
@@ -612,7 +738,31 @@ class PipelineRunner:
         scene: SceneSpec,
         scene_code_key: str,
         started_at: float,
+        ai_scene_code_draft: SceneCodeDraftSpec | None = None,
     ) -> tuple[SceneCodeArtifact, str | None]:
+        if ai_scene_code_draft is not None:
+            candidate_codes = [
+                ai_scene_code_draft.revised_code,
+                ai_scene_code_draft.draft_code,
+            ]
+            for candidate_code in candidate_codes:
+                try:
+                    validate_generated_code(candidate_code)
+                except CodeValidationError:
+                    continue
+                class_name = self._extract_class_name(candidate_code)
+                if class_name is None:
+                    continue
+                return (
+                    SceneCodeArtifact(
+                        scene=scene,
+                        class_name=class_name,
+                        scene_module=candidate_code,
+                        object_key=scene_code_key,
+                    ),
+                    None,
+                )
+
         try:
             class_name, scene_module = build_scene_module(scene)
             validate_generated_code(scene_module, expected_class_name=class_name)
@@ -648,6 +798,17 @@ class PipelineRunner:
                 ),
                 "code_validation_template_fallback",
             )
+
+    @staticmethod
+    def _extract_class_name(code: str) -> str | None:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return None
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                return node.name
+        return None
 
     async def _render_scene_with_fallback(
         self,
@@ -773,6 +934,26 @@ class PipelineRunner:
         )
 
     @staticmethod
+    def _build_audio_aligned_storyboard(
+        storyboard,
+        scene_audio_metadata: dict[int, tuple[int, str, bytes]],
+    ):
+        return storyboard.model_copy(
+            update={
+                "scenes": [
+                    scene.model_copy(
+                        update={
+                            "target_render_duration_ms": scene_audio_metadata[
+                                scene.scene_index
+                            ][0],
+                        }
+                    )
+                    for scene in storyboard.scenes
+                ]
+            }
+        )
+
+    @staticmethod
     def _build_bullet_fallback_scene(scene: SceneSpec) -> SceneSpec | None:
         if scene.template_type == "bullet":
             return None
@@ -780,7 +961,11 @@ class PipelineRunner:
         return scene.model_copy(
             update={
                 "template_type": "bullet",
+                "scene_kind": "fallback",
                 "purpose": f"{scene.purpose} (fallback)",
                 "visual_elements": scene.visual_elements[:4] or [scene.narration_text],
+                "camera_plan": scene.camera_plan.model_copy(update={"mode": "static"}),
+                "transition_strategy": "fade",
+                "chart_data": None,
             },
         )
