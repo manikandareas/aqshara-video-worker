@@ -34,12 +34,12 @@ class OpenAITtsClient:
         settings: WorkerSettings,
         client: AsyncOpenAI | None = None,
     ) -> None:
-        self._api_key = settings.openai_api_key
-        self._model = settings.openai_tts_model
+        self._api_key = settings.video_tts_openai_api_key
+        self._model = settings.video_tts_openai_model
         self._client = client or AsyncOpenAI(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-            timeout=settings.openai_timeout_sec,
+            api_key=settings.video_tts_openai_api_key,
+            base_url=settings.video_tts_openai_base_url,
+            timeout=settings.video_tts_openai_timeout_sec,
         )
 
     async def generate_speech(
@@ -47,9 +47,12 @@ class OpenAITtsClient:
         text: str,
         voice: str,
         language: VideoLanguage,
+        voice_instruction: str | None = None,
     ) -> bytes:
         if not self._api_key:
-            raise TtsConfigurationError("OPENAI_API_KEY is required for TTS")
+            raise TtsConfigurationError(
+                "VIDEO_TTS_OPENAI_API_KEY is required for TTS"
+            )
 
         payload = {
             "model": self._model,
@@ -57,7 +60,7 @@ class OpenAITtsClient:
             "input": text,
             "response_format": "pcm",
         }
-        instructions = self._build_language_instruction(language)
+        instructions = self._build_language_instruction(language, voice_instruction)
         payload["instructions"] = instructions if instructions else Omit()
 
         try:
@@ -110,7 +113,14 @@ class OpenAITtsClient:
         return buffer.getvalue()
 
     @staticmethod
-    def _build_language_instruction(language: VideoLanguage) -> str:
+    def _build_language_instruction(
+        language: VideoLanguage,
+        voice_instruction: str | None = None,
+    ) -> str:
         if language == "id":
-            return "Read the narration naturally in Indonesian."
-        return "Read the narration naturally in English."
+            base = "Read the narration naturally in Indonesian."
+        else:
+            base = "Read the narration naturally in English."
+        if voice_instruction:
+            return f"{base} {voice_instruction}".strip()
+        return base

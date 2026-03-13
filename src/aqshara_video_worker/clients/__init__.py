@@ -1,3 +1,4 @@
+from .ai_clients import CreativeGenerationClient, TtsClient
 from .callback_client import CallbackClient
 from .event_publisher import VideoEventPublisher
 from .storage_client import StorageClient
@@ -13,10 +14,12 @@ from .tts_client import (
 __all__ = [
     "AudioDurationError",
     "CallbackClient",
+    "CreativeGenerationClient",
     "EmptyAudioError",
     "OpenAITtsClient",
     "RedisStreamEventPublisher",
     "StorageClient",
+    "TtsClient",
     "TtsConfigurationError",
     "TtsGenerationError",
     "VideoEventPublisher",
