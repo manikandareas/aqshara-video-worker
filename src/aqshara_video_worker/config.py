@@ -60,16 +60,55 @@ class WorkerSettings(BaseSettings):
     r2_access_key_id: str = Field(alias="R2_ACCESS_KEY_ID")
     r2_secret_access_key: str = Field(alias="R2_SECRET_ACCESS_KEY")
     r2_bucket: str = Field(alias="R2_BUCKET")
-    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
-    openai_base_url: str = Field(
+    video_tts_openai_api_key: str | None = Field(
+        default=None,
+        alias="VIDEO_TTS_OPENAI_API_KEY",
+    )
+    video_tts_openai_base_url: str = Field(
         default="https://api.openai.com/v1",
-        alias="OPENAI_BASE_URL",
+        alias="VIDEO_TTS_OPENAI_BASE_URL",
     )
-    openai_tts_model: str = Field(
+    video_tts_openai_model: str = Field(
         default="gpt-4o-mini-tts",
-        alias="OPENAI_TTS_MODEL",
+        alias="VIDEO_TTS_OPENAI_MODEL",
     )
-    openai_timeout_sec: float = Field(default=60, alias="OPENAI_TIMEOUT_SEC")
+    video_tts_openai_timeout_sec: float = Field(
+        default=60,
+        alias="VIDEO_TTS_OPENAI_TIMEOUT_SEC",
+    )
+    video_creative_provider: str = Field(
+        default="openai_compatible",
+        alias="VIDEO_CREATIVE_PROVIDER",
+    )
+    video_creative_api_key: str | None = Field(
+        default=None,
+        alias="VIDEO_CREATIVE_API_KEY",
+    )
+    video_creative_base_url: str | None = Field(
+        default=None,
+        alias="VIDEO_CREATIVE_BASE_URL",
+    )
+    video_creative_generation_model: str | None = Field(
+        default=None,
+        alias="VIDEO_CREATIVE_GENERATION_MODEL",
+    )
+    video_creative_critique_model: str | None = Field(
+        default=None,
+        alias="VIDEO_CREATIVE_CRITIQUE_MODEL",
+    )
+    video_creative_codegen_model: str | None = Field(
+        default=None,
+        alias="VIDEO_CREATIVE_CODEGEN_MODEL",
+    )
+    video_creative_timeout_sec: float = Field(
+        default=90.0,
+        alias="VIDEO_CREATIVE_TIMEOUT_SEC",
+    )
+    video_ai_creative_enabled: bool = Field(
+        default=True,
+        alias="VIDEO_AI_CREATIVE_ENABLED",
+    )
+    video_ai_max_revisions: int = Field(default=1, alias="VIDEO_AI_MAX_REVISIONS")
     video_render_backend: str = Field(default="mock", alias="VIDEO_RENDER_BACKEND")
     video_render_profile: str = Field(default="720p", alias="VIDEO_RENDER_PROFILE")
     video_render_timeout_sec: int = Field(default=180, alias="VIDEO_RENDER_TIMEOUT_SEC")
