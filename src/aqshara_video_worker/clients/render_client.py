@@ -153,6 +153,8 @@ class MockRenderClient:
 
 
 class DaytonaRenderClient:
+    _default_api_url = "https://app.daytona.io/api"
+
     def __init__(self, settings: WorkerSettings) -> None:
         self._settings = settings
         self._client = self._create_daytona_client()
@@ -264,10 +266,9 @@ class DaytonaRenderClient:
 
         config_kwargs: dict[str, str] = {
             "api_key": self._settings.daytona_api_key or "",
+            "api_url": self._settings.daytona_api_url or self._default_api_url,
             "target": self._settings.daytona_target or "",
         }
-        if self._settings.daytona_api_url:
-            config_kwargs["api_url"] = self._settings.daytona_api_url
         return AsyncDaytona(DaytonaConfig(**config_kwargs))
 
     async def _create_sandbox_with_fallback(self):
