@@ -1,0 +1,14 @@
+FROM python:3.12-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ffmpeg \
+        pkg-config \
+        libcairo2-dev \
+        libpango1.0-dev \
+        libglib2.0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir manim==0.19.0
+
+WORKDIR /workspace

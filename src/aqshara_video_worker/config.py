@@ -109,10 +109,28 @@ class WorkerSettings(BaseSettings):
         alias="VIDEO_AI_CREATIVE_ENABLED",
     )
     video_ai_max_revisions: int = Field(default=1, alias="VIDEO_AI_MAX_REVISIONS")
+    video_tts_concurrency: int = Field(default=3, alias="VIDEO_TTS_CONCURRENCY")
+    video_render_concurrency: int = Field(default=2, alias="VIDEO_RENDER_CONCURRENCY")
+    video_render_qa_enabled: bool = Field(
+        default=True,
+        alias="VIDEO_RENDER_QA_ENABLED",
+    )
+    video_render_qa_max_revisions: int = Field(
+        default=2,
+        alias="VIDEO_RENDER_QA_MAX_REVISIONS",
+    )
+    video_render_qa_sample_frames: int = Field(
+        default=3,
+        alias="VIDEO_RENDER_QA_SAMPLE_FRAMES",
+    )
     video_render_backend: str = Field(default="mock", alias="VIDEO_RENDER_BACKEND")
     video_render_profile: str = Field(default="720p", alias="VIDEO_RENDER_PROFILE")
     video_render_timeout_sec: int = Field(default=180, alias="VIDEO_RENDER_TIMEOUT_SEC")
     video_merge_timeout_sec: int = Field(default=120, alias="VIDEO_MERGE_TIMEOUT_SEC")
+    video_merge_crossfade_sec: float = Field(
+        default=0.0,
+        alias="VIDEO_MERGE_CROSSFADE_SEC",
+    )
     video_audio_sync_max_drift_pct: float = Field(
         default=15.0,
         alias="VIDEO_AUDIO_SYNC_MAX_DRIFT_PCT",
@@ -137,3 +155,7 @@ class WorkerSettings(BaseSettings):
         alias="DAYTONA_RENDER_MEMORY_GB",
     )
     daytona_render_disk_gb: int = Field(default=8, alias="DAYTONA_RENDER_DISK_GB")
+    video_daytona_sandbox_pool_size: int = Field(
+        default=2,
+        alias="VIDEO_DAYTONA_SANDBOX_POOL_SIZE",
+    )

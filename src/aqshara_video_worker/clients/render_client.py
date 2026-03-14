@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - guarded at runtime
     CreateSandboxFromImageParams = None
 
 
-RenderProfile = Literal["480p", "720p"]
+RenderProfile = Literal["480p", "720p", "1080p"]
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,10 @@ class DaytonaResourceProfile:
 
 
 class RenderClient(Protocol):
+    async def start_job(self) -> None: ...
+
+    async def finish_job(self) -> None: ...
+
     async def render_scene(
         self,
         *,
@@ -71,6 +75,13 @@ class RenderClient(Protocol):
         render_profile: RenderProfile,
     ) -> RenderSceneResult: ...
 
+    async def extract_preview_frames(
+        self,
+        *,
+        video_bytes: bytes,
+        sample_count: int,
+    ) -> list[bytes]: ...
+
     async def close(self) -> None: ...
 
 
@@ -78,6 +89,13 @@ class MockRenderClient:
     def __init__(self, settings: WorkerSettings) -> None:
         self._ffmpeg_binary = settings.ffmpeg_binary
         self._timeout_sec = settings.video_render_timeout_sec
+        self._ffprobe_binary = settings.ffprobe_binary
+
+    async def start_job(self) -> None:
+        return None
+
+    async def finish_job(self) -> None:
+        return None
 
     async def render_scene(
         self,
@@ -151,6 +169,20 @@ class MockRenderClient:
     async def close(self) -> None:
         return None
 
+    async def extract_preview_frames(
+        self,
+        *,
+        video_bytes: bytes,
+        sample_count: int,
+    ) -> list[bytes]:
+        return await _extract_preview_frames(
+            ffmpeg_binary=self._ffmpeg_binary,
+            ffprobe_binary=self._ffprobe_binary,
+            video_bytes=video_bytes,
+            sample_count=sample_count,
+            timeout_sec=self._timeout_sec,
+        )
+
 
 class DaytonaRenderClient:
     _default_api_url = "https://app.daytona.io/api"
@@ -158,6 +190,10 @@ class DaytonaRenderClient:
     def __init__(self, settings: WorkerSettings) -> None:
         self._settings = settings
         self._client = self._create_daytona_client()
+        self._sandbox_queue: asyncio.Queue | None = None
+        self._sandboxs: list[object] = []
+        self._provision_notes: list[str | None] = []
+        self._pool_lock = asyncio.Lock()
 
     async def render_scene(
         self,
@@ -184,7 +220,7 @@ class DaytonaRenderClient:
         stderr_chunks: list[str] = []
 
         try:
-            sandbox, provision_note = await self._create_sandbox_with_fallback()
+            sandbox, provision_note = await self._acquire_sandbox()
             if provision_note:
                 stdout_chunks.append(provision_note)
         except Exception as error:  # pragma: no cover - depends on Daytona runtime
@@ -251,14 +287,32 @@ class DaytonaRenderClient:
                 f"Daytona render failed for scene {scene_index}: {error}",
             ) from error
         finally:
-            try:
-                await sandbox.delete()
-            except Exception:  # pragma: no cover - cleanup best effort
-                pass
+            await self._release_sandbox(sandbox)
+
+    async def start_job(self) -> None:
+        await self._ensure_pool()
+
+    async def finish_job(self) -> None:
+        await self._destroy_pool()
 
     async def close(self) -> None:
+        await self._destroy_pool()
         if self._client is not None:
             await self._client.close()
+
+    async def extract_preview_frames(
+        self,
+        *,
+        video_bytes: bytes,
+        sample_count: int,
+    ) -> list[bytes]:
+        return await _extract_preview_frames(
+            ffmpeg_binary=self._settings.ffmpeg_binary,
+            ffprobe_binary=self._settings.ffprobe_binary,
+            video_bytes=video_bytes,
+            sample_count=sample_count,
+            timeout_sec=self._settings.video_render_timeout_sec,
+        )
 
     def _create_daytona_client(self):
         if AsyncDaytona is None or DaytonaConfig is None:
@@ -364,6 +418,8 @@ class DaytonaRenderClient:
     def _resolve_quality(render_profile: RenderProfile) -> tuple[str, str]:
         if render_profile == "480p":
             return ("l", "854x480")
+        if render_profile == "1080p":
+            return ("h", "1920x1080")
         return ("m", "1280x720")
 
     @staticmethod
@@ -403,6 +459,55 @@ class DaytonaRenderClient:
         stderr_value = "\n".join(str(part) for part in stderr_parts if part).strip()
         return stdout_value, stderr_value
 
+    async def _ensure_pool(self) -> None:
+        async with self._pool_lock:
+            if self._sandbox_queue is not None:
+                return
+
+            queue: asyncio.Queue = asyncio.Queue()
+            provision_notes: list[str | None] = []
+            pool_size = max(
+                1,
+                min(
+                    self._settings.video_daytona_sandbox_pool_size,
+                    self._settings.video_render_concurrency,
+                ),
+            )
+            for _ in range(pool_size):
+                sandbox, provision_note = await self._create_sandbox_with_fallback()
+                await queue.put(sandbox)
+                self._sandboxs.append(sandbox)
+                provision_notes.append(provision_note)
+            self._sandbox_queue = queue
+            self._provision_notes = provision_notes
+
+    async def _destroy_pool(self) -> None:
+        async with self._pool_lock:
+            sandboxs = self._sandboxs
+            self._sandboxs = []
+            self._sandbox_queue = None
+            self._provision_notes = []
+
+        for sandbox in sandboxs:
+            try:
+                await sandbox.delete()
+            except Exception:
+                pass
+
+    async def _acquire_sandbox(self):
+        await self._ensure_pool()
+        assert self._sandbox_queue is not None
+        sandbox = await self._sandbox_queue.get()
+        provision_note = None
+        if getattr(self, "_provision_notes", None):
+            provision_note = self._provision_notes.pop(0)
+        return sandbox, provision_note
+
+    async def _release_sandbox(self, sandbox) -> None:
+        if self._sandbox_queue is None:
+            return
+        await self._sandbox_queue.put(sandbox)
+
 
 def create_render_client(settings: WorkerSettings) -> RenderClient:
     backend = settings.video_render_backend.strip().lower()
@@ -411,3 +516,119 @@ def create_render_client(settings: WorkerSettings) -> RenderClient:
     if backend == "daytona":
         return DaytonaRenderClient(settings)
     raise RenderConfigurationError(f"Unsupported VIDEO_RENDER_BACKEND: {backend}")
+
+
+async def _extract_preview_frames(
+    *,
+    ffmpeg_binary: str,
+    ffprobe_binary: str,
+    video_bytes: bytes,
+    sample_count: int,
+    timeout_sec: int,
+) -> list[bytes]:
+    if sample_count <= 0:
+        return []
+
+    try:
+        with TemporaryDirectory(prefix="aqshara-frame-sample-") as tmp_dir:
+            workspace = Path(tmp_dir)
+            video_path = workspace / "scene.mp4"
+            video_path.write_bytes(video_bytes)
+            duration = await _probe_video_duration(
+                ffprobe_binary=ffprobe_binary,
+                video_path=video_path,
+                timeout_sec=timeout_sec,
+            )
+            if duration <= 0:
+                duration = 1.0
+
+            timestamps = _frame_timestamps(duration, sample_count)
+            frames: list[bytes] = []
+            for index, timestamp in enumerate(timestamps, start=1):
+                frame_path = workspace / f"frame-{index:02d}.png"
+                process = await asyncio.create_subprocess_exec(
+                    ffmpeg_binary,
+                    "-y",
+                    "-ss",
+                    f"{timestamp:.3f}",
+                    "-i",
+                    str(video_path),
+                    "-frames:v",
+                    "1",
+                    str(frame_path),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    _stdout, stderr = await asyncio.wait_for(
+                        process.communicate(),
+                        timeout=timeout_sec,
+                    )
+                except TimeoutError as error:
+                    process.kill()
+                    await process.communicate()
+                    raise RenderTimeoutError("Timed out extracting preview frames") from error
+
+                if process.returncode != 0 or not frame_path.exists():
+                    raise RenderClientError(
+                        "Failed to extract preview frame: "
+                        f"{stderr.decode('utf-8', errors='replace').strip()}"
+                    )
+                frames.append(frame_path.read_bytes())
+            return frames
+    except FileNotFoundError as error:
+        raise RenderConfigurationError(
+            f"Missing required media binary: {error.filename}",
+        ) from error
+
+
+async def _probe_video_duration(
+    *,
+    ffprobe_binary: str,
+    video_path: Path,
+    timeout_sec: int,
+) -> float:
+    process = await asyncio.create_subprocess_exec(
+        ffprobe_binary,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(),
+            timeout=timeout_sec,
+        )
+    except TimeoutError as error:
+        process.kill()
+        await process.communicate()
+        raise RenderTimeoutError("Timed out probing rendered video duration") from error
+
+    if process.returncode != 0:
+        raise RenderClientError(
+            "ffprobe failed while sampling preview frames: "
+            f"{stderr.decode('utf-8', errors='replace').strip()}"
+        )
+
+    raw_value = stdout.decode("utf-8", errors="replace").strip()
+    try:
+        return float(raw_value)
+    except ValueError:
+        return 0.0
+
+
+def _frame_timestamps(duration_sec: float, sample_count: int) -> list[float]:
+    if sample_count == 1:
+        return [max(duration_sec * 0.5, 0.0)]
+
+    usable_duration = max(duration_sec - 0.1, 0.1)
+    return [
+        round((usable_duration * index) / (sample_count - 1), 3)
+        for index in range(sample_count)
+    ]

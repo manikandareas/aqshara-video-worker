@@ -9,6 +9,7 @@ from aqshara_video_worker.schemas import (
     DirectorPlanSpec,
     PaperAnalysisSpec,
     SceneCodeDraftSpec,
+    SceneRenderQASpec,
     StoryboardSpec,
     VideoLanguage,
 )
@@ -46,5 +47,23 @@ class CreativeGenerationClient(Protocol):
         storyboard: StoryboardSpec,
         language: str,
     ) -> dict[int, SceneCodeDraftSpec]: ...
+
+    async def review_rendered_scene(
+        self,
+        *,
+        scene_index: int,
+        scene_json: str,
+        scene_code: str,
+        render_profile: str,
+        sample_frames: list[bytes],
+    ) -> SceneRenderQASpec: ...
+
+    async def revise_scene_code_for_render_qa(
+        self,
+        *,
+        scene_json: str,
+        scene_code: str,
+        review: SceneRenderQASpec,
+    ) -> str: ...
 
     async def close(self) -> None: ...

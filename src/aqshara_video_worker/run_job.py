@@ -92,6 +92,11 @@ async def _process_command(
         dependencies.merge_client,
         creative_client=dependencies.creative_client,
         render_profile=command.render_profile or settings.video_render_profile,
+        tts_concurrency=settings.video_tts_concurrency,
+        render_concurrency=settings.video_render_concurrency,
+        render_qa_enabled=settings.video_render_qa_enabled,
+        render_qa_max_revisions=settings.video_render_qa_max_revisions,
+        render_qa_sample_frames=settings.video_render_qa_sample_frames,
     )
     heartbeat_task = asyncio.create_task(_heartbeat_loop(publisher, settings))
 

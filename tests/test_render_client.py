@@ -39,7 +39,7 @@ BASE_SETTINGS = {
     "daytona_api_key": None,
     "daytona_target": None,
     "daytona_python_version": "3.12",
-    "daytona_render_image": None,
+    "daytona_render_image": "ghcr.io/acme/aqshara-manim:latest",
     "daytona_create_timeout_sec": 300,
     "daytona_render_cpu": 2,
     "daytona_render_memory_gb": 4,
@@ -129,6 +129,7 @@ async def test_daytona_render_client_surfaces_exec_output() -> None:
     settings.video_render_backend = "daytona"
     settings.daytona_api_key = "key"
     settings.daytona_target = "eu"
+    settings.video_daytona_sandbox_pool_size = 1
     client = DaytonaRenderClient(settings)
     client._client = _FakeDaytonaClient()
 
@@ -163,6 +164,7 @@ async def test_daytona_render_client_retries_with_smaller_resources() -> None:
     settings.video_render_backend = "daytona"
     settings.daytona_api_key = "key"
     settings.daytona_target = "eu"
+    settings.video_daytona_sandbox_pool_size = 1
     client = DaytonaRenderClient(settings)
     fake_client = _QuotaFallbackDaytonaClient()
     client._client = fake_client

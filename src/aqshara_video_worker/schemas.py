@@ -28,6 +28,8 @@ PipelineStage = Literal[
     "tts_generating",
     "code_validating",
     "rendering",
+    "scene_reviewing",
+    "scene_revising",
     "merging",
     "uploading",
     "completed",
@@ -223,6 +225,17 @@ class SceneCodeCritiqueSpec(BaseModel):
     requires_revision: bool = True
 
 
+class SceneRenderQASpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scene_index: int = Field(ge=1)
+    strengths: list[str] = Field(default_factory=list)
+    issues: list[str] = Field(default_factory=list)
+    revision_brief: str = Field(min_length=1)
+    requires_revision: bool = True
+    qa_status: Literal["pass", "revise"] = "revise"
+
+
 class SceneCodeDraftSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -269,6 +282,8 @@ class InternalVideoSceneProgress(BaseModel):
     audio_object_key: str | None = None
     manim_code_object_key: str | None = None
     video_object_key: str | None = None
+    qa_status: Literal["pending", "passed", "revising", "failed"] | None = None
+    revision_attempt: int | None = Field(default=None, ge=0)
 
 
 class InternalVideoMetrics(BaseModel):

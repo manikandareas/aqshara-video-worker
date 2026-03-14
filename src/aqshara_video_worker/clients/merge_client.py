@@ -10,7 +10,7 @@ from typing import Literal, Protocol
 from aqshara_video_worker.config import WorkerSettings
 
 
-RenderProfile = Literal["480p", "720p"]
+RenderProfile = Literal["480p", "720p", "1080p"]
 
 
 @dataclass(frozen=True)
@@ -70,6 +70,7 @@ class FfmpegMergeClient:
         self._ffprobe_binary = self._resolve_binary(settings.ffprobe_binary)
         self._timeout_sec = settings.video_merge_timeout_sec
         self._max_drift_pct = settings.video_audio_sync_max_drift_pct
+        self._crossfade_sec = settings.video_merge_crossfade_sec
 
     async def merge_scenes(
         self,
@@ -147,6 +148,8 @@ class FfmpegMergeClient:
                             "aac",
                             "-ar",
                             "48000",
+                            "-b:a",
+                            "192k",
                             "-t",
                             f"{expected_scene_duration_sec:.3f}",
                             str(merged_clip),
@@ -174,28 +177,16 @@ class FfmpegMergeClient:
                     )
                     clip_paths.append(merged_clip)
 
-                concat_file = workspace / "concat.txt"
-                concat_file.write_text(
-                    "".join(f"file '{clip_path.as_posix()}'\n" for clip_path in clip_paths),
-                    encoding="utf-8",
-                )
-
                 final_path = workspace / "final.mp4"
-                concatenated = await self._run_command(
-                    [
-                        self._ffmpeg_binary,
-                        "-y",
-                        "-f",
-                        "concat",
-                        "-safe",
-                        "0",
-                        "-i",
-                        str(concat_file),
-                        "-c",
-                        "copy",
-                        str(final_path),
-                    ],
-                )
+
+                if self._crossfade_sec > 0 and len(clip_paths) > 1:
+                    concatenated = await self._run_xfade_concat(
+                        clip_paths, final_path, stdout_logs,
+                    )
+                else:
+                    concatenated = await self._run_stream_copy_concat(
+                        clip_paths, workspace, final_path,
+                    )
                 stdout_logs.append(f"concat-stdout:\n{concatenated.stdout.strip()}")
                 if concatenated.stderr.strip():
                     stderr_logs.append(f"concat-stderr:\n{concatenated.stderr.strip()}")
@@ -234,6 +225,108 @@ class FfmpegMergeClient:
                 f"Missing required media binary: {error.filename}",
             ) from error
 
+    async def _run_stream_copy_concat(
+        self,
+        clip_paths: list[Path],
+        workspace: Path,
+        final_path: Path,
+    ) -> CommandResult:
+        concat_file = workspace / "concat.txt"
+        concat_file.write_text(
+            "".join(f"file '{clip_path.as_posix()}'\n" for clip_path in clip_paths),
+            encoding="utf-8",
+        )
+        return await self._run_command(
+            [
+                self._ffmpeg_binary,
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_file),
+                "-c",
+                "copy",
+                str(final_path),
+            ],
+        )
+
+    async def _run_xfade_concat(
+        self,
+        clip_paths: list[Path],
+        final_path: Path,
+        stdout_logs: list[str],
+    ) -> CommandResult:
+        durations: list[float] = []
+        for clip in clip_paths:
+            durations.append(await self._probe_duration(clip))
+
+        fade_dur = self._crossfade_sec
+        inputs: list[str] = []
+        for clip in clip_paths:
+            inputs.extend(["-i", str(clip)])
+
+        n = len(clip_paths)
+        # Build xfade filter chain for video
+        filter_parts: list[str] = []
+        # Fade-in on the very first clip
+        filter_parts.append(
+            f"[0:v]fade=t=in:d={min(fade_dur, 0.3):.3f}[v0_fi];"
+        )
+        prev_label = "v0_fi"
+        offset = durations[0] - fade_dur
+        for i in range(1, n):
+            out_label = f"vx{i}"
+            if i == n - 1:
+                # Last pair: also apply fade-out
+                filter_parts.append(
+                    f"[{prev_label}][{i}:v]xfade=transition=fade:duration={fade_dur:.3f}:offset={offset:.3f},"
+                    f"fade=t=out:d={min(fade_dur, 0.3):.3f}:st={offset + durations[i] - fade_dur - min(fade_dur, 0.3):.3f}[{out_label}];"
+                )
+            else:
+                filter_parts.append(
+                    f"[{prev_label}][{i}:v]xfade=transition=fade:duration={fade_dur:.3f}:offset={offset:.3f}[{out_label}];"
+                )
+            prev_label = out_label
+            if i < n - 1:
+                offset = offset + durations[i] - fade_dur
+
+        # Build audio amerge with concat filter
+        audio_inputs = "".join(f"[{i}:a]" for i in range(n))
+        filter_parts.append(
+            f"{audio_inputs}concat=n={n}:v=0:a=1[aout]"
+        )
+
+        filter_complex = "".join(filter_parts)
+        stdout_logs.append(f"crossfade-filter: {filter_complex}")
+
+        cmd = [
+            self._ffmpeg_binary,
+            "-y",
+            *inputs,
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            f"[{prev_label}]",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ar",
+            "48000",
+            "-b:a",
+            "192k",
+            str(final_path),
+        ]
+        return await self._run_command(cmd)
+
     async def _probe_duration(self, output_path: Path) -> float:
         result = await self._run_command(
             [
@@ -262,6 +355,8 @@ class FfmpegMergeClient:
     def _resolve_output_dimensions(render_profile: RenderProfile) -> tuple[int, int]:
         if render_profile == "480p":
             return (854, 480)
+        if render_profile == "1080p":
+            return (1920, 1080)
         return (1280, 720)
 
     def _validate_scene_duration(

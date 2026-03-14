@@ -88,3 +88,20 @@ class UnsafeScene(Scene):
         self.wait(1)
 """
         )
+
+
+def test_build_scene_module_does_not_emit_unsupported_emerald_symbol() -> None:
+    scene = SceneSpec(
+        scene_index=5,
+        title="Takeaway Scene",
+        template_type="takeaway",
+        purpose="Close with a clear final insight",
+        narration_text="Summarize the strongest result and the practical implication.",
+        planned_duration_ms=8000,
+        visual_elements=["Result", "Implication", "Next step"],
+    )
+
+    _class_name, code = build_scene_module(scene)
+
+    assert "EMERALD" not in code
+    assert '"#2FAE7A"' in code

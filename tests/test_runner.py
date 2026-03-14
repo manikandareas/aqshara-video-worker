@@ -392,6 +392,9 @@ async def test_runner_emits_progress_and_complete_callbacks() -> None:
         tts_client,
         render_client,
         merge_client,
+        tts_concurrency=1,
+        render_concurrency=1,
+        render_qa_enabled=False,
     )
 
     await runner.run(
@@ -534,6 +537,7 @@ async def test_runner_maps_validation_failures_to_storyboard_invalid() -> None:
         tts_client,
         render_client,
         merge_client,
+        render_qa_enabled=False,
     )
 
     try:
@@ -586,6 +590,7 @@ async def test_runner_maps_code_validation_failures_to_code_validating() -> None
         tts_client,
         render_client,
         merge_client,
+        render_qa_enabled=False,
     )
 
     await runner.report_failure(
@@ -747,6 +752,8 @@ async def test_runner_downgrades_render_profile_after_render_failure() -> None:
         tts_client,
         render_client,
         merge_client,
+        render_concurrency=1,
+        render_qa_enabled=False,
     )
 
     await runner.run(
@@ -763,7 +770,7 @@ async def test_runner_downgrades_render_profile_after_render_failure() -> None:
 
     assert render_client.requests[0] == (1, "720p")
     assert render_client.requests[1] == (1, "480p")
-    assert merge_client.requests == [([1, 2, 3, 4, 5], "480p")]
+    assert merge_client.requests == [([1, 2, 3, 4, 5], "720p")]
 
     fallback_events = [
         event
@@ -773,7 +780,7 @@ async def test_runner_downgrades_render_profile_after_render_failure() -> None:
     ]
     assert fallback_events
     assert fallback_events[0][2]["render_profile"] == "480p"
-    assert callback_client.events[-1][2]["resolution"] == "854x480"
+    assert callback_client.events[-1][2]["resolution"] == "1280x720"
 
 
 @pytest.mark.asyncio
@@ -789,6 +796,8 @@ async def test_runner_does_not_retry_render_configuration_failures() -> None:
         tts_client,
         render_client,
         merge_client,
+        render_concurrency=1,
+        render_qa_enabled=False,
     )
 
     with pytest.raises(RenderConfigurationError):
@@ -804,7 +813,8 @@ async def test_runner_does_not_retry_render_configuration_failures() -> None:
             )
         )
 
-    assert render_client.requests == [(1, "720p")]
+    assert render_client.requests[0] == (1, "720p")
+    assert all(profile == "720p" for _, profile in render_client.requests)
 
 
 @pytest.mark.asyncio

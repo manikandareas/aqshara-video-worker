@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from aqshara_video_worker.schemas import (
     PaperAnalysisSpec,
     SceneCodeCritiqueSpec,
     SceneCodeDraftSpec,
+    SceneRenderQASpec,
     SceneSpec,
     SceneScriptSpec,
     ScriptPlanSpec,
@@ -239,7 +241,8 @@ class OpenAICompatibleCreativeGenerationClient:
                 "role": "system",
                 "content": (
                     "You write concise narration for visual explainers. Return only valid JSON. "
-                    "Narration must align with the director plan and be easy for TTS."
+                    "Narration must align with the director plan, be easy for TTS, and stay compact. "
+                    "Prefer 1-3 short sentences per scene, avoid filler, and leave visual breathing room."
                 ),
             },
             {
@@ -248,6 +251,8 @@ class OpenAICompatibleCreativeGenerationClient:
                     f"Language: {language}\n\n"
                     f"Paper analysis:\n{paper_analysis.model_dump_json(indent=2)}\n\n"
                     f"Director plan:\n{director_plan.model_dump_json(indent=2)}\n\n"
+                    "Keep each scene narration within roughly 85-90% of its visual time budget.\n"
+                    "Avoid repeated setup phrases and long clauses.\n\n"
                     f"Return JSON matching this shape:\n{json.dumps(schema_hint, indent=2)}"
                 ),
             },
@@ -332,8 +337,9 @@ class OpenAICompatibleCreativeGenerationClient:
             {
                 "role": "system",
                 "content": (
-                    "Write a single ManimCE scene class body for the provided structured scene. "
-                    "Use only Manim imports, no filesystem/network access, and no markdown fences."
+                    "Write a single premium ManimCE scene class for the provided structured scene. "
+                    "Use only Manim imports, no filesystem/network/process access, and no markdown fences. "
+                    "Readability is non-negotiable: avoid overlapping text, overcrowded frames, and text that becomes too small to read."
                 ),
             },
             {
@@ -343,6 +349,13 @@ class OpenAICompatibleCreativeGenerationClient:
                     f"Paper analysis:\n{paper_analysis.model_dump_json(indent=2)}\n\n"
                     f"Director scene:\n{director_scene_json}\n\n"
                     f"Scene contract:\n{scene_json}\n\n"
+                    "Requirements:\n"
+                    "- Keep a strong visual hierarchy.\n"
+                    "- Use at most 2 large text blocks on screen at once unless the rest are small labels.\n"
+                    "- Do not stack text over text.\n"
+                    "- Keep titles and body text readable at 720p.\n"
+                    "- Prefer diagrams, spatial grouping, highlights, and camera motion over dense text walls.\n"
+                    "- You may invent a premium composition; you do not need to follow a fixed template.\n\n"
                     "Return complete Python code with `from manim import *`, `config.background_color`, "
                     "and exactly one Scene or MovingCameraScene subclass."
                 ),
@@ -368,7 +381,8 @@ class OpenAICompatibleCreativeGenerationClient:
                 "role": "system",
                 "content": (
                     "You are a strict Manim scene reviewer. Judge visual clarity, animation continuity, "
-                    "camera use, and likely syntax/runtime issues. Return only valid JSON."
+                    "camera use, readability, text density, text overlap risk, and likely syntax/runtime issues. "
+                    "Return only valid JSON."
                 ),
             },
             {
@@ -384,6 +398,62 @@ class OpenAICompatibleCreativeGenerationClient:
             self._critique_model,
             messages,
             response_model=SceneCodeCritiqueSpec,
+        )
+
+    async def review_rendered_scene(
+        self,
+        *,
+        scene_index: int,
+        scene_json: str,
+        scene_code: str,
+        render_profile: str,
+        sample_frames: list[bytes],
+    ) -> SceneRenderQASpec:
+        schema_hint = {
+            "scene_index": scene_index,
+            "strengths": ["string"],
+            "issues": ["string"],
+            "revision_brief": "string",
+            "requires_revision": True,
+            "qa_status": "revise",
+        }
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a strict rendered-scene QA reviewer for Manim videos. "
+                    "Detect text overlap, unreadably small text, clipping, overcrowded layouts, and weak hierarchy. "
+                    "Return only valid JSON."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Render profile: {render_profile}\n\n"
+                            f"Scene contract:\n{scene_json}\n\n"
+                            f"Candidate Manim code:\n{scene_code}\n\n"
+                            "Judge the rendered output, not only the code. "
+                            "If text overlaps, is too small, or the frame feels overcrowded, require revision.\n\n"
+                            f"Return JSON matching this shape:\n{json.dumps(schema_hint, indent=2)}"
+                        ),
+                    },
+                    *[
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": _image_data_url(frame_bytes)},
+                        }
+                        for frame_bytes in sample_frames
+                    ],
+                ],
+            },
+        ]
+        return await self._chat_json(
+            self._critique_model,
+            messages,
+            response_model=SceneRenderQASpec,
         )
 
     async def _revise_scene_code(
@@ -412,10 +482,38 @@ class OpenAICompatibleCreativeGenerationClient:
         ]
         return _strip_code_fences(await self._chat_text(self._codegen_model, messages))
 
+    async def revise_scene_code_for_render_qa(
+        self,
+        *,
+        scene_json: str,
+        scene_code: str,
+        review: SceneRenderQASpec,
+    ) -> str:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Revise the ManimCE scene code to fix rendered-scene QA issues. "
+                    "Prioritize readability, spacing, and a clearer hierarchy. "
+                    "Return only Python code with no markdown fences."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Scene contract:\n{scene_json}\n\n"
+                    f"Original code:\n{scene_code}\n\n"
+                    f"Rendered-scene QA review:\n{review.model_dump_json(indent=2)}\n\n"
+                    "Fix overlap, clipping, too-small text, and overcrowded layouts first."
+                ),
+            },
+        ]
+        return _strip_code_fences(await self._chat_text(self._codegen_model, messages))
+
     async def _chat_json(
         self,
         model: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         response_model: type[StructuredResponseModel],
     ) -> StructuredResponseModel:
@@ -436,7 +534,7 @@ class OpenAICompatibleCreativeGenerationClient:
     async def _chat_structured(
         self,
         model: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         response_model: type[StructuredResponseModel],
     ) -> StructuredResponseModel:
         try:
@@ -472,7 +570,7 @@ class OpenAICompatibleCreativeGenerationClient:
     async def _chat_text(
         self,
         model: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         json_mode: bool = False,
     ) -> str:
@@ -588,6 +686,11 @@ def _strip_code_fences(value: str) -> str:
         cleaned = re.sub(r"^```[a-zA-Z0-9_+-]*\n?", "", cleaned)
         cleaned = re.sub(r"\n?```$", "", cleaned)
     return cleaned.strip()
+
+
+def _image_data_url(frame_bytes: bytes) -> str:
+    encoded = base64.b64encode(frame_bytes).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
 def _load_json_object(raw_content: str) -> object:

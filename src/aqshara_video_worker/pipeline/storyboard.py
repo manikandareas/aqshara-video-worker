@@ -430,7 +430,8 @@ def _score_director_plan(plan: DirectorPlanSpec) -> float:
 
 def _compose_narration_text(scene: DirectorSceneSpec) -> str:
     pause = " " if scene.narration_cues.pause_after_ms < 250 else " ... "
-    return pause.join(beat.narration.rstrip(".") + "." for beat in scene.beats)
+    compact_beats = [_sentence_excerpt(beat.narration, max_words=12) for beat in scene.beats]
+    return pause.join(sentence.rstrip(".") + "." for sentence in compact_beats[:3])
 
 
 def _extract_pages(ocr_result: object) -> list[dict[str, object]]:
